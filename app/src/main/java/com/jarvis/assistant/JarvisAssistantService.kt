@@ -24,6 +24,6 @@ class JarvisVoiceSession(
 
         val intent = Intent(context, MainActivity::class.java)
 
-        startVoiceActivity(intent)
+        startAssistantActivity(intent)
     }
 }
