@@ -1,9 +1,15 @@
 package com.jarvis.assistant
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -21,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import java.util.Locale
 
 data class ChatMessage(
@@ -66,6 +73,13 @@ fun getDemoReply(message: String): String {
 fun JarvisScreen() {
     var message by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("SYSTEM ONLINE") }
+    var isMuted by remember { mutableStateOf(false) }
+    var speechRecognizer by remember {
+        mutableStateOf<SpeechRecognizer?>(null)
+    }
+    var tts by remember {
+        mutableStateOf<TextToSpeech?>(null)
+    }
 
     val messages = remember {
         mutableStateListOf<ChatMessage>()
@@ -74,26 +88,7 @@ fun JarvisScreen() {
     val context = LocalContext.current
     val cyan = Color(0xFF00D9FF)
     val background = Color(0xFF050B16)
-
-    var tts by remember {
-        mutableStateOf<TextToSpeech?>(null)
-    }
-
-    DisposableEffect(context) {
-        val engine = TextToSpeech(context) { result ->
-            if (result == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.getDefault()
-            }
-        }
-
-        tts = engine
-
-        onDispose {
-            engine.stop()
-            engine.shutdown()
-            tts = null
-        }
-    }
+    val handler = remember { Handler(Looper.getMainLooper()) }
 
     val speechIntent = remember {
         Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -106,41 +101,182 @@ fun JarvisScreen() {
                 Locale.getDefault()
             )
             putExtra(
-                RecognizerIntent.EXTRA_PROMPT,
-                "Speak to JARVIS"
+                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
+                false
             )
         }
     }
 
-    val speechLauncher =
-        rememberLauncherForActivityResult(
-            ActivityResultContracts.StartActivityForResult()
-        ) { result ->
-            val spokenText = result.data
-                ?.getStringArrayListExtra(
-                    RecognizerIntent.EXTRA_RESULTS
-                )
-                ?.firstOrNull()
+    fun startListening() {
+        if (isMuted) return
 
-            if (!spokenText.isNullOrBlank()) {
-                message = spokenText
-                status = "VOICE RECEIVED"
-            } else {
-                status = "NO SPEECH DETECTED"
-            }
+        if (
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            status = "MICROPHONE PERMISSION REQUIRED"
+            return
         }
+
+        try {
+            status = "LISTENING..."
+            speechRecognizer?.startListening(speechIntent)
+        } catch (e: Exception) {
+            status = "VOICE START ERROR"
+        }
+    }
+
+    fun stopListening() {
+        try {
+            speechRecognizer?.cancel()
+        } catch (_: Exception) {
+        }
+    }
 
     val permissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
             if (granted) {
-                status = "LISTENING..."
-                speechLauncher.launch(speechIntent)
+                startListening()
             } else {
                 status = "MICROPHONE PERMISSION DENIED"
             }
         }
+
+    DisposableEffect(context) {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            status = "VOICE RECOGNITION UNAVAILABLE"
+            onDispose { }
+        } else {
+            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            speechRecognizer = recognizer
+
+            recognizer.setRecognitionListener(
+                object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) {
+                        if (!isMuted) status = "LISTENING..."
+                    }
+
+                    override fun onBeginningOfSpeech() {
+                        status = "HEARING YOU..."
+                    }
+
+                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+                    override fun onEndOfSpeech() {
+                        status = "PROCESSING..."
+                    }
+
+                    override fun onError(error: Int) {
+                        if (!isMuted) {
+                            status = "RESTARTING LISTENING..."
+                            handler.postDelayed({
+                                startListening()
+                            }, 800)
+                        }
+                    }
+
+                    override fun onResults(results: Bundle?) {
+                        val spokenText = results
+                            ?.getStringArrayList(
+                                SpeechRecognizer.RESULTS_RECOGNITION
+                            )
+                            ?.firstOrNull()
+
+                        if (!spokenText.isNullOrBlank()) {
+                            messages.add(
+                                ChatMessage(spokenText, true)
+                            )
+
+                            val reply = getDemoReply(spokenText)
+
+                            messages.add(
+                                ChatMessage(reply, false)
+                            )
+
+                            status = "JARVIS RESPONDING..."
+
+                            tts?.speak(
+                                reply,
+                                TextToSpeech.QUEUE_FLUSH,
+                                null,
+                                "jarvis_reply"
+                            )
+                        } else if (!isMuted) {
+                            handler.postDelayed({
+                                startListening()
+                            }, 500)
+                        }
+                    }
+
+                    override fun onPartialResults(partialResults: Bundle?) {}
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                }
+            )
+
+            onDispose {
+                handler.removeCallbacksAndMessages(null)
+                recognizer.destroy()
+                speechRecognizer = null
+            }
+        }
+    }
+
+    DisposableEffect(context) {
+        val engine = TextToSpeech(context) { result ->
+            if (result == TextToSpeech.SUCCESS) {
+                tts?.language = Locale.getDefault()
+            }
+        }
+
+        tts = engine
+
+        engine.setOnUtteranceProgressListener(
+            object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+
+                override fun onDone(utteranceId: String?) {
+                    handler.post {
+                        if (!isMuted) {
+                            status = "LISTENING..."
+                            startListening()
+                        }
+                    }
+                }
+
+                override fun onError(utteranceId: String?) {
+                    handler.post {
+                        if (!isMuted) startListening()
+                    }
+                }
+            }
+        )
+
+        onDispose {
+            engine.stop()
+            engine.shutdown()
+            tts = null
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val permissionGranted =
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (permissionGranted) {
+            startListening()
+        } else {
+            permissionLauncher.launch(
+                Manifest.permission.RECORD_AUDIO
+            )
+        }
+    }
 
     fun sendMessage() {
         val question = message.trim()
@@ -159,7 +295,7 @@ fun JarvisScreen() {
             )
 
             message = ""
-            status = "SYSTEM ONLINE"
+            status = "JARVIS RESPONDING..."
         }
     }
 
@@ -216,14 +352,34 @@ fun JarvisScreen() {
                     fontSize = 15.sp
                 )
 
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Button(
+                    onClick = {
+                        isMuted = !isMuted
+
+                        if (isMuted) {
+                            stopListening()
+                            tts?.stop()
+                            status = "MICROPHONE MUTED"
+                        } else {
+                            startListening()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (isMuted) "UNMUTE JARVIS" else "MUTE JARVIS"
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(15.dp))
 
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
-                    verticalArrangement =
-                        Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(messages) { chat ->
                         Surface(
@@ -243,9 +399,7 @@ fun JarvisScreen() {
                                     fontSize = 12.sp
                                 )
 
-                                Spacer(
-                                    modifier = Modifier.height(5.dp)
-                                )
+                                Spacer(modifier = Modifier.height(5.dp))
 
                                 Text(
                                     chat.text,
@@ -272,24 +426,10 @@ fun JarvisScreen() {
                     Spacer(modifier = Modifier.width(8.dp))
 
                     Button(
-                        onClick = {
-                            permissionLauncher.launch(
-                                Manifest.permission.RECORD_AUDIO
-                            )
-                        },
-                        contentPadding = PaddingValues(12.dp)
+                        onClick = { sendMessage() }
                     ) {
-                        Text("🎙")
+                        Text("SEND")
                     }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Button(
-                    onClick = { sendMessage() },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("SEND")
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
