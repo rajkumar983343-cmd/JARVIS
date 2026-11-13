@@ -9,6 +9,7 @@ import android.service.voice.VoiceInteractionSessionService
 class JarvisAssistantService : VoiceInteractionService()
 
 class JarvisSessionService : VoiceInteractionSessionService() {
+
     override fun onNewSession(args: Bundle?): VoiceInteractionSession {
         return JarvisVoiceSession(this)
     }
@@ -21,14 +22,8 @@ class JarvisVoiceSession(
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
 
-        val intent = Intent(context, MainActivity::class.java).apply {
-            addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP
-            )
-        }
+        val intent = Intent(context, MainActivity::class.java)
 
-        context.startActivity(intent)
-        hide()
+        startVoiceActivity(intent)
     }
 }
